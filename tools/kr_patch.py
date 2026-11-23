@@ -504,6 +504,62 @@ def patch_exp_digits(r):
         r.put("exp text: 5 digits", h + 5, [0x24], [0x25])
 
 
+# credits page of the Korean port (user 2026-11-24: like the REA GBA ports — FireRed credits.py, Emerald/Ruby build_*.py
+# CREDITS_PAGE '한글화' / '박노진 책임연구원'). In English: the credits scene loads no Hangul font (Korean text came out as
+# the scene's own tiles on screen), the ROM's credits strings are English, and the user named 'nojin.bak' either language
+CREDITS_PAGE = ("KOREAN LOCALIZATION", "NOJIN.BAK")
+CREDITS_CHARS = {" ": 0x7F, ".": 0xE8, **{chr(65 + i): 0x80 + i for i in range(26)}}   # the ROM's credits strings (A = $80)
+CREDITS_TEXT_BANK_FREE = 0x7000   # moved script + page strings go to the strings bank from here (zero in both ROMs)
+
+
+def patch_credits(r):
+    """Ending credits: one more page (CREDITS_PAGE on lines 1·2, WAIT 12 like the staff pages) right before the Korean ROM's
+    own last command $F8 (logo, then copyright and THE END).
+    - The credits bank ($21) has 97 free bytes, so the script (292 bytes) cannot grow there: GetCreditsByte (27 bytes) is
+      rewritten in place to read the script from the strings bank with GetFarByte, and the script (+6 bytes) is copied
+      there. The strings pointer table ends where the bank's zero tail starts, so its two new entries go right after it.
+    - Strings are placed by the ROM's own credits printer (ld a, <strings bank> / call) in its English charset (CREDITS_CHARS),
+      centred on the 20-tile line with spaces like the ROM's own strings."""
+    get = r.find("credits: GetCreditsByte", "E5 D5 FA ?? ?? 5F FA ?? ?? 57 21 ?? ?? 19 13 7B EA ?? ?? 7A EA ?? ?? 7E D1 E1 C9")
+    bank = get // 0x4000
+    pos = r.d[get + 3] | r.d[get + 4] << 8
+    script = bank * 0x4000 + (r.d[get + 11] | r.d[get + 12] << 8) - 0x4000
+    pt = r.find("credits: strings table", "21 ?? ?? 19 19 2A 56 5F F1")
+    sbank_at = r.find("credits: strings bank", "01 28 00 CD ?? ?? 3E ?? CD ?? ??")
+    assert pt // 0x4000 == bank and sbank_at // 0x4000 == bank
+    sbank = r.d[sbank_at + 7]
+    table = bank * 0x4000 + (r.d[pt + 1] | r.d[pt + 2] << 8) - 0x4000
+    end = script
+    while r.d[end] != 0xFF:
+        end += 2 if r.d[end] in (0xFE, 0xFD, 0xFA) or r.d[end] < 0xF8 else 1
+    old = bytes(r.d[script:end + 1])
+    ids, k = set(), 0
+    while k < len(old) - 1:
+        if old[k] < 0xF8:
+            ids.add(old[k])
+        k += 2 if old[k] in (0xFE, 0xFD, 0xFA) or old[k] < 0xF8 else 1
+    n = max(ids) + 1
+    assert table + 2 * n == bank * 0x4000 + 0x4000 - free_tail(r.d, bank), "credits: strings table is not at the zero tail"
+    at = old.rindex(bytes([0xFE, 0x0C, 0xF8])) + 2
+    new_script = old[:at] + bytes([n, 1, n + 1, 2, 0xFE, 0x0C]) + old[at:]
+    strs = [bytes(CREDITS_CHARS[c] for c in " " * ((20 - len(t)) // 2) + t) + b"\x50" for t in CREDITS_PAGE]
+    off = sbank * 0x4000 + CREDITS_TEXT_BANK_FREE - 0x4000
+    blob = new_script + b"".join(strs)
+    assert not any(r.d[off:off + len(blob)]), "credits: strings bank space not empty"
+    r.d[off:off + len(blob)] = blob
+    s1 = CREDITS_TEXT_BANK_FREE + len(new_script)
+    s2 = s1 + len(strs[0])
+    r.log.append(f"credits: script {len(new_script)} bytes + page strings at {sbank:02x}:{CREDITS_TEXT_BANK_FREE:04x}")
+    r.put("credits: strings table +2", table + 2 * n, bytes(4), bytes(lo_hi(s1) + lo_hi(s2)))
+    r.put("credits: GetCreditsByte", get, r.d[get:get + 27], bytes([
+        0xE5, 0xD5,                                    # push hl / push de
+        0x21, *lo_hi(pos), 0x5E, 0x23, 0x56,           # ld hl, wCreditsPos / ld e, [hl] / inc hl / ld d, [hl]
+        0x13, 0x72, 0x2B, 0x73, 0x1B,                  # inc de / ld [hl], d / dec hl / ld [hl], e / dec de
+        0x21, *lo_hi(CREDITS_TEXT_BANK_FREE), 0x19,    # ld hl, script / add hl, de
+        0x3E, sbank, 0xCD, *lo_hi(KR2["GetFarByte"]),  # ld a, strings bank / call GetFarByte
+        0xD1, 0xE1, 0xC9]))                            # pop de / pop hl / ret
+
+
 def patch_trade_shiny(r):
     t = r.find("trades: table", "00 60 42 ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? 37 66")
     for k in range(6):
@@ -700,6 +756,7 @@ def main():
     patch_trade_shiny(r)
     patch_caught_ball(r)
     patch_exp_digits(r)
+    patch_credits(r)
     patch_guide(r, wild_start, en_rom, en_sym, args.repo)
     fix_global_checksum(r.d)
     Path(args.out).write_bytes(bytes(r.d))
