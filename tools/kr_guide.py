@@ -181,6 +181,23 @@ def wild_tables(d, start):
     return grass, water
 
 
+def wild_tables_lv(d, start):
+    """like wild_tables with levels: [(group, num, [(level, species)] morn, day, nite)], [(group, num, [(level, species)])]"""
+    grass, water, o = [], [], start
+    for kind in ("grass", "water", "grass", "water"):
+        while d[o] != 0xFF:
+            g, n = d[o], d[o + 1]
+            if kind == "grass":
+                sl = [(d[o + 5 + 2 * k], d[o + 5 + 2 * k + 1]) for k in range(21)]
+                grass.append((g, n, sl[0:7], sl[7:14], sl[14:21]))
+                o += 47
+            else:
+                water.append((g, n, [(d[o + 3 + 2 * k], d[o + 3 + 2 * k + 1]) for k in range(3)]))
+                o += 9
+        o += 1
+    return grass, water
+
+
 def marked_list(species, names, enc):
     """distinct species, each after a blank tile for its caught mark -> (string, number of lines, species in order);
     no species -> '없음' (no blanks, no species bytes)
@@ -243,6 +260,7 @@ class Facts:
         self.landmark_of = {(g, n): self.C[lm] for g, n, lm, _ in self.maps.values()}
         self.fishgroup_of = {(g, n): self.C[f] for g, n, _, f in self.maps.values()}
         self.grass, self.water = wild_tables(d, wild_start)
+        self.grass_lv, self.water_lv = wild_tables_lv(d, wild_start)
 
     def flag(self, kind, name):
         """(RAM address, mask) of an event flag or a badge"""
@@ -327,11 +345,194 @@ def dex_strings(f, names, enc):
     return out
 
 
-def build_data(f, enc):
+# ---- 이 맵 출현 table pages (user 2026-11-18/24: the same table as the 3rd/4th-generation guides) ----
+WILD_LINES = 7                       # body lines per screen (rows 4, 6, ... 16; title on row 2)
+WILD_COLS = 18                       # columns 1 .. 18 inside the frame
+PCT_HEAD = "확률"                     # the Korean font has no '%': the method line says 확률 above the numbers
+WALK_LABEL = {"ROUTE": "풀숲", "TOWN": "풀숲", "CAVE": "동굴", "DUNGEON": "동굴"}   # other maps (towers, ruins): 건물 안
+TIMES = ("아침", "낮", "밤")
+
+
+def map_environments(repo):
+    """{MapName: ENVIRONMENT} (data/maps/maps.asm third field)"""
+    text = (Path(repo) / "data/maps/maps.asm").read_text(encoding="utf-8")
+    return {m.group(1): m.group(2) for m in re.finditer(r"^\s+map (\w+), \w+, (\w+),", text, re.M)}
+
+
+def fish_rods(repo):
+    """({fishgroup 1-based: [old, good, super]}, [time groups (day SPECIES, level, nite SPECIES, level)]) — each rod a list of
+    (percent, SPECIES or ('time', n), level); an entry's chance is its cumulative percent minus the one before
+    (data/wild/fish.asm — 'percent + 1' is rounding). Fishing has no even-odds mod: these are the original chances"""
+    text = (Path(repo) / "data/wild/fish.asm").read_text(encoding="utf-8")
+    table = re.findall(r"^\s*fishgroup [^,]+, (\.\w+),\s*(\.\w+),\s*(\.\w+)", text, re.M)
+    blocks, cur, times, in_time = {}, None, [], False
+    for line in text.splitlines():
+        line = line.split(";")[0]
+        m = re.match(r"(\.\w+):", line)
+        if m:
+            cur = blocks.setdefault(m.group(1), [])
+            continue
+        if line.startswith("TimeFishGroups:"):
+            in_time, cur = True, None
+            continue
+        if in_time:
+            m = re.match(r"\s*db (\w+),\s*(\d+),\s*(\w+),\s*(\d+)", line)
+            if m:
+                times.append((m.group(1), int(m.group(2)), m.group(3), int(m.group(4))))
+            continue
+        m = re.match(r"\s*db\s+(\d+) percent(?: \+ 1)?,\s*(?:time_group (\d+)|(\w+),\s*(\d+))", line)
+        if m and cur is not None:
+            cur.append((int(m.group(1)), ("time", int(m.group(2))) if m.group(2) else m.group(3), int(m.group(4) or 0)))
+    out = {}
+    for k, labels in enumerate(table, 1):
+        rods = []
+        for lb in labels:
+            prev, rod = 0, []
+            for thr, what, lv in blocks[lb]:
+                rod.append((thr - prev, what, lv))
+                prev = thr
+            rods.append(rod)
+        out[k] = rods
+    return out, times
+
+
+def wild_sections(f, g, n, env, fish, ftimes):
+    """[(label, [(species id, min level, max level, percent)])] of one map in screen order"""
+    sid = {s: i + 1 for i, s in enumerate(f.species)}
+    grass = {(a, b): (m, dy, nt) for a, b, m, dy, nt in f.grass_lv}
+    water = {(a, b): sl for a, b, sl in f.water_lv}
+    out = []
+
+    def even(slots):
+        """mod rule (kr_patch patch_even_odds): every distinct species of the table has the same chance"""
+        rows = {}
+        for lv, sp in slots:
+            if sp:
+                lo, hi = rows.get(sp, (lv, lv))
+                rows[sp] = (min(lo, lv), max(hi, lv))
+        return [(sp, lo, hi, 100 // len(rows)) for sp, (lo, hi) in rows.items()]
+
+    def merge(entries):
+        rows = {}
+        for pct, sp, lv in entries:
+            p0, lo, hi = rows.get(sp, (0, lv, lv))
+            rows[sp] = (p0 + pct, min(lo, lv), max(hi, lv))
+        return [(sp, lo, hi, p) for sp, (p, lo, hi) in rows.items()]
+
+    def by_time(label, lists):
+        """lists in TIMES order -> sections; equal neighbours joined (아침·낮); all equal -> just the label"""
+        groups = []
+        for t, rows in zip(TIMES, lists):
+            if groups and groups[-1][1] == rows:
+                groups[-1][0].append(t)
+            else:
+                groups.append(([t], rows))
+        if len(groups) == 1:
+            return [(label, groups[0][1])]
+        return [(f"{label} {'·'.join(ts)}", rows) for ts, rows in groups]
+    if (g, n) in grass:
+        out += by_time(WALK_LABEL.get(env, "건물 안"), [even(t) for t in grass[(g, n)]])
+    if (g, n) in water:
+        out.append(("파도타기", even(water[(g, n)])))
+        for rod, label in zip(fish.get(f.fishgroup_of.get((g, n)), ()), ("낡은낚싯대", "좋은낚싯대", "대단한낚싯대")):
+            day, nite = [], []
+            for pct, what, lv in rod:
+                if isinstance(what, tuple):
+                    ds, dl, ns, nl = ftimes[what[1]]
+                    day.append((pct, sid[ds], dl))
+                    nite.append((pct, sid[ns], nl))
+                else:
+                    day.append((pct, sid[what], lv))
+                    nite.append((pct, sid[what], lv))
+            d, nt = merge(day), merge(nite)
+            out += [(label, d)] if d == nt else [(f"{label} 아침·낮", d), (f"{label} 밤", nt)]
+    return out
+
+
+def wild_pages(sections, place, names, enc, single):
+    """[(title, body, marks)] — 7 body lines a screen; a screen that starts inside a method repeats its label first; a label
+    is never alone on the last line. Species line: blank (caught mark) + name (5 tiles) + blank + 'Lv' level range (7) +
+    percent right-aligned (4) = 18 tiles; label line: label + '확률' at the right end"""
+    def asc(t):
+        return bytes(single[c] for c in t)
+
+    def pad(raw, w):
+        return raw + b"\x7f" * (w - width(raw))
+    lines = []                                   # (kind, raw, species)
+    for label, rows in sections:
+        head = enc(label)
+        assert width(head) + 2 <= WILD_COLS, label
+        lines.append(("head", pad(head, WILD_COLS - 2) + enc(PCT_HEAD), None))
+        for sp, lo, hi, pct in rows:
+            lv = asc("Lv" + (f"{lo}" if lo == hi else f"{lo}-{hi}"))
+            p = asc(str(pct))
+            raw = b"\x7f" + pad(names[sp][0], 5) + b"\x7f" + pad(lv, 7) + b"\x7f" * (4 - width(p)) + p
+            assert width(raw) == WILD_COLS, (sp, lo, hi, pct)
+            lines.append(("sp", raw, sp))
+    screens, i = [], 0
+    while i < len(lines):
+        cur = []
+        if lines[i][0] == "sp":
+            k = i
+            while lines[k][0] != "head":
+                k -= 1
+            cur.append(lines[k])
+        while i < len(lines) and len(cur) < WILD_LINES:
+            if lines[i][0] == "head" and cur and len(cur) == WILD_LINES - 1:
+                break
+            cur.append(lines[i])
+            i += 1
+        screens.append(cur)
+    out = []
+    base = place + b"\x7f" + enc("출현")
+    for k, cur in enumerate(screens):
+        num = asc(f"{k + 1}/{len(screens)}")
+        title = base if width(base) + 1 + width(num) <= WILD_COLS - 1 else place
+        title = pad(title, WILD_COLS - 1 - width(num)) + num
+        body = bytes([NEXT]).join(raw for _, raw, _ in cur)
+        marks = b"".join(bytes([ln, sp]) for ln, (kind, _, sp) in enumerate(cur) if kind == "sp") + b"\xff"
+        out.append((title, body, marks))
+    return out
+
+
+def build_wild(f, names, enc, banks):
+    """WildIndex (guide bank: db group, number, BANK / dw page list) and wild_data.inc (page lists and strings packed into the
+    given empty banks); maps with identical pages (cave floors with the same table) share one block"""
+    import kr_charset
+    single = kr_charset.single_bytes(HERE.parent)
+    env = map_environments(f.repo)
+    name_of = {(g, n): m for m, (g, n, _, _) in f.maps.items()}
+    fish, ftimes = fish_rods(f.repo)
+    maps = list(dict.fromkeys([(g, n) for g, n, *_ in f.grass_lv] + [(g, n) for g, n, _ in f.water_lv]))
+    blocks, label_of, index = [], {}, ["WildIndex:"]
+    for g, n in maps:
+        pages = wild_pages(wild_sections(f, g, n, env.get(name_of.get((g, n)), ""), fish, ftimes),
+                           f.place[f.landmark_of[(g, n)]], names, enc, single)
+        key = tuple(pages)
+        if key not in label_of:
+            label_of[key] = f"WildPages{len(label_of)}"
+            blocks.append((label_of[key], pages))
+        index.append(f"\tdb ${g:02X}, ${n:02X}, BANK({label_of[key]})\n\tdw {label_of[key]}")
+    index.append("\tdb $FF")
+    out, bank_i, used = [], 0, 0x4000
+    for lb, pages in blocks:
+        size = 1 + 6 * len(pages) + sum(len(t) + len(b) + 2 + len(m) for t, b, m in pages)
+        if used + size > 0x4000:
+            assert bank_i < len(banks), "이 맵 출현: not enough empty banks"
+            out.append(f'SECTION "KRWild{bank_i}", ROMX[$4000], BANK[${banks[bank_i]:02X}]')
+            bank_i += 1
+            used = 0
+        used += size
+        out.append(f"{lb}:\n\tdb {len(pages)}")
+        for k in range(len(pages)):
+            out.append(f"\tdw {lb}_t{k}, {lb}_b{k}, {lb}_m{k}")
+        for k, (t, b, m) in enumerate(pages):
+            out += [f"{lb}_t{k}:\n{db(t + bytes([0x50]))}", f"{lb}_b{k}:\n{db(b + bytes([0x50]))}", f"{lb}_m{k}:\n{db(m)}"]
+    return "\n".join(index), "\n".join(out) + "\n", banks[:bank_i], (len(maps), sum(len(p) for _, p in blocks))
+
+
+def build_data(f, enc, wild_banks):
     names = mon_names(f.d)
-    water_of = {(g, n): sp for g, n, sp in f.water}
-    maps = [(g, n) for g, n, *_ in f.grass] + [(g, n) for g, n, _ in f.water if (g, n) not in {(a, b) for a, b, *_ in f.grass}]
-    grass_of = {(g, n): (m, dy, nt) for g, n, m, dy, nt in f.grass}
     strings, label_of = [], {}
 
     def label(blob, tail=b""):
@@ -341,18 +542,7 @@ def build_data(f, enc):
             label_of[key] = f"GuideStr{len(label_of)}"
             strings.append(f"{label_of[key]}:\n{db(key)}")
         return label_of[key]
-    lines, most = ["WildIndex:"], [0, 0]
-    for g, n in maps:
-        m, dy, nt = grass_of.get((g, n), ([], [], []))
-        ptrs = []
-        for k, sp in enumerate((m, dy, nt, water_of.get((g, n), []))):
-            blob, count, species = marked_list(sp, names, enc)
-            most[k == 3] = max(most[k == 3], count)
-            ptrs.append(label(blob, bytes(species)))
-        ptrs.append(label(f.place[f.landmark_of[(g, n)]]))
-        lines.append(f"\tdb ${g:02X}, ${n:02X}\n\tdw {', '.join(ptrs)}")
-    assert most[0] <= MAX_GRASS_LINES and most[1] <= MAX_WATER_LINES, f"wild lists too long for the page: {most}"
-    lines.append("\tdb $FF")
+    lines = []
     # 전설과 환상
     sid = {s: i + 1 for i, s in enumerate(f.species)}
     lines.append("LegendTable:")
@@ -383,10 +573,6 @@ def build_data(f, enc):
         "TxtMenuItems": "이 맵 출현\n전설과 환상\n다음 목표\n도감 안내",
         "TxtWildTitle": "이 맵 출현",
         "TxtNoWild": "야생 포켓몬이 없다",
-        "TxtMorn": "풀숲 (아침)",
-        "TxtDay": "풀숲 (낮)",
-        "TxtNite": "풀숲 (밤)",
-        "TxtWater": "물 위",
         "TxtLegendTitle": "전설과 환상",
         "TxtDone": "끝",
         "TxtNotYet": "불탄 탑 사건 뒤",
@@ -397,10 +583,10 @@ def build_data(f, enc):
     released = f.flag("event", "EVENT_RELEASED_THE_BEASTS")
     out = ["DEF NUM_PAGES EQU 4", f"DEF RELEASED_ADDR EQU ${released[0]:04X}", f"DEF RELEASED_MASK EQU ${released[1]:02X}"]
     out += [f"{k}:\n{db(enc(v) + bytes([0x50]))}" for k, v in texts.items()]
-    out.append("TimeLabels:\n\tdw TxtMorn, TxtDay, TxtNite")
-    out += lines + strings
+    wild_index, wild_data, used_banks, counts = build_wild(f, names, enc, wild_banks)
+    out += [wild_index] + lines + strings
     dex_where = {sp: dex[sp] for sp in range(1, 252)}
-    return "\n".join(out) + "\n", len(maps), dex_where
+    return "\n".join(out) + "\n", wild_data, used_banks, counts, dex_where
 
 
 def patch_guide(r, wild_start, en_rom, en_sym, repo):
@@ -426,7 +612,14 @@ def patch_guide(r, wild_start, en_rom, en_sym, repo):
             "MACRO ORIGINAL_START_MENU_ITEMS", "\tdw " + ", ".join(f"${v:04X}" for v in orig), "ENDM",
             "MACRO GUIDE_ITEM_STRING", db(enc("공략") + b"\x50"), "ENDM",
             "MACRO GUIDE_ITEM_DESC", db(enc("출현 전설\n목표 안내") + b"\x50"), "ENDM"]
-    data, nmaps, dex = build_data(facts, enc)
+    # 이 맵 출현 pages: banks that are empty (all zero) in this ROM, from the top; FarPlaceString in bank 0's zero run
+    wild_banks = [b for b in range(len(d) // 0x4000 - 1, 0x10, -1) if b != GUIDE_BANK and not any(d[b * 0x4000:(b + 1) * 0x4000])]
+    home = re.search(rb"\x00{24,}", bytes(d[0x150:0x4000]))
+    assert home, "bank 0: no free bytes for FarPlaceString"
+    home_free = 0x150 + home.start() + 2
+    getfar = _one(d, "GetFarByte", "ea ?? ?? f0 ?? f5 fa ?? ?? d7 7e ea ?? ?? f1 d7 fa ?? ?? c9")
+    inc += [f"DEF GetFarByte EQU ${getfar:04X}", f"DEF hROMBank EQU $FF{d[getfar + 4]:02X}", f"DEF HOME_FREE EQU ${home_free:04X}"]
+    data, wild_data, used_banks, (nmaps, npages), dex = build_data(facts, enc, wild_banks)
     import kr_charset
     dec = kr_charset.decoder({**kr_charset.hangul(), **kr_charset.SYMBOLS}, kr_charset.single_bytes(HERE.parent))
     end = bytes([0x50])
@@ -435,6 +628,7 @@ def patch_guide(r, wild_start, en_rom, en_sym, repo):
         t = Path(tmp)
         (t / "kr_syms.inc").write_text("\n".join(inc) + "\n", encoding="utf-8")
         (t / "guide_data.inc").write_text(data, encoding="utf-8")
+        (t / "wild_data.inc").write_text(wild_data, encoding="utf-8")
         (t / "guide.asm").write_text((HERE / "kr_guide" / "guide.asm").read_text(encoding="utf-8"), encoding="utf-8")
         res = subprocess.run(["docker", "run", "--rm", "-v", f"{t}:/w", "-w", "/w", "pokegold-build", "sh", "-c",
                               "rgbasm -o guide.o guide.asm && rgblink -m guide.map -n guide.sym -o guide.gbc guide.o"],
@@ -449,8 +643,16 @@ def patch_guide(r, wild_start, en_rom, en_sym, repo):
     d[free4:free4 + len(b4)] = b4
     code = out[gb:gb + 0x4000].rstrip(b"\x00")
     d[gb:gb + len(code)] = code
+    hb = out[home_free:0x4000].rstrip(b"\x00")
+    assert not any(d[home_free:home_free + len(hb)])
+    d[home_free:home_free + len(hb)] = hb
+    for b in used_banks:
+        blk = out[b * 0x4000:(b + 1) * 0x4000].rstrip(b"\x00")
+        d[b * 0x4000:b * 0x4000 + len(blk)] = blk
+    r.log.append(f"guide: 이 맵 출현 {nmaps} maps, {npages} pages in banks {', '.join(f'{b:02X}' for b in used_banks)}, "
+                 f"FarPlaceString 00:{home_free:04X} ({len(hb)} bytes)")
     r.log.append(f"guide: bank 04:{0x4000 + free4 - 0x10000:04X} {len(b4)} bytes (items + hooks), bank {GUIDE_BANK:02X} {len(code)} bytes "
-                 f"({nmaps} maps) — " + ", ".join(f"{k} {v:04X}" for k, v in {**syms, **facts.ram}.items()))
+                 f"— " + ", ".join(f"{k} {v:04X}" for k, v in {**syms, **facts.ram}.items()))
     lo_hi = lambda v: [v & 0xFF, v >> 8]
     r.put("guide: START menu item table", spots["items_ref"], d[spots["items_ref"]:spots["items_ref"] + 2], lo_hi(sym["GuideMenuItems"]))
     r.put("guide: after 가방", spots["pack_site"], [0x3E, 0x02, 0xCD, *lo_hi(syms["AppendMenuList"])], [0xCD, *lo_hi(sym["GuidePackHook"])])

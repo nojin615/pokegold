@@ -32,8 +32,7 @@ DEF CURSOR_COL  EQU 2
 DEF LIST_LINES  EQU 6       ; rows 5, 7, ... 15
 DEF DONE_COL    EQU 16
 DEF ROAM_PLACE_COL EQU 6
-DEF WILD_ROW    EQU 7       ; 이 맵 출현: grass names (3 lines: 7, 9, 11), water names
-DEF WATER_ROW   EQU 15
+DEF WILD_BODY_ROW EQU 4     ; 이 맵 출현: 7 body lines on rows 4, 6, ... 16 (title on row 2)
 DEF MARK_TILE   EQU $60     ; '■' before a caught species (the Emerald guide marks them with a red square)
 DEF NEXT_CHAR   EQU $59     ; kr_guide.py NEXT
 DEF NUM_SPECIES EQU 251
@@ -42,8 +41,6 @@ DEF wGuideSkip    EQU wStringBuffer1
 DEF wGuideSpecies EQU wStringBuffer1 + 1
 DEF wGuideLines   EQU wStringBuffer1 + 2
 DEF wGuideEntry   EQU wStringBuffer1 + 3   ; 2 bytes
-DEF wMarkSpecies  EQU wStringBuffer1 + 5   ; 2 bytes: DrawMarks — next species byte
-DEF wMarkLine     EQU wStringBuffer1 + 7   ; 2 bytes: DrawMarks — first tile of the current line
 
 SECTION "KRGuideBank4", ROMX[BANK4_FREE], BANK[4]
 
@@ -272,158 +269,124 @@ Pager:
 .call_hl
 	jp hl
 
-; 이 맵 출현: grass species of this time of day and water species of the current map (lists made at build time)
+; 이 맵 출현: the map's table pages (kr_guide.py wild_pages — made at build time, in the WILD banks): FindWild gives the
+; bank and the page list (db pages / per page dw title, body, marks); each screen is drawn with FarPlaceString (bank 0) and the
+; marks list (db line, species ... $FF) puts MARK_TILE before every caught species (column 1 of body line `line`)
 PageWild:
-	ld de, TxtWildTitle
-	call FrameTitle
 	ld a, [wMapGroup]
 	ld b, a
 	ld a, [wMapNumber]
 	ld c, a
 	call FindWild
 	jr nc, .found
+	ld de, TxtWildTitle
+	call FrameTitle
 	hlcoord 2, 5
 	ld de, TxtNoWild
 	call PlaceString
-	jr .done
-.found                                 ; hl -> dw morn, day, nite, water, place, then the mark tables of morn .. water
+	call WaitBGMap
+	jp WaitAB
+.found                                 ; hl -> db bank / dw page list
+	ld a, [hli]
+	ld [wGuideSpecies], a              ; bank of this map's pages
+	ld a, [hli]
+	ld h, [hl]
+	ld l, a
 	ld a, l
 	ld [wGuideEntry], a
 	ld a, h
 	ld [wGuideEntry + 1], a
-	ld a, [wTimeOfDay]
-	cp 3
-	jr c, .time
-	ld a, 2
-.time
-	ld [wGuideSpecies], a              ; time of day 0..2 while this page is drawn
-	add a
-	ld e, a
-	ld d, 0
-	ld hl, TimeLabels
-	add hl, de
-	ld a, [hli]
-	ld d, [hl]
-	ld e, a
-	hlcoord 2, 5
-	call PlaceString
 	ld a, [wGuideSpecies]
-	add a
-	call WildPtr
-	hlcoord 2, WILD_ROW
-	call PlaceString
-	hlcoord 2, 13
-	ld de, TxtWater
-	call PlaceString
-	ld a, 6
-	call WildPtr
-	hlcoord 2, WATER_ROW
-	call PlaceString
-	ld a, [wGuideSpecies]               ; caught marks (each name has a blank before it, kr_guide.py marked_list)
-	add a
-	call WildPtr
-	hlcoord 2, WILD_ROW
-	call DrawMarks
-	ld a, 6
-	call WildPtr
-	hlcoord 2, WATER_ROW
-	call DrawMarks
-.done
-	call WaitBGMap
-	jp WaitAB
+	call GetFarByte
+	ld [wGuideLines], a                ; number of pages
+	ld hl, WildScreen
+	jp Pager
 
-WildPtr:                               ; a = byte offset into the found WildIndex pointers -> de = that pointer
-	ld e, a
-	ld d, 0
-	ld a, [wGuideEntry]
+WildScreen:                            ; c = page -> carry when more pages follow
+	push bc
+	call Frame
+	pop bc
+	push bc
+	ld a, [wGuideEntry]                ; hl = page list + 1 + 6 c
 	ld l, a
 	ld a, [wGuideEntry + 1]
 	ld h, a
-	add hl, de
-	ld a, [hli]
-	ld d, [hl]
+	inc hl
+	ld a, c
+	add a
 	ld e, a
-	ret
-
-; de = a marked name list (kr_guide.py marked_list), hl = the tile PlaceString started it at: walks the string the
-; way PlaceString drew it (1 tile per character, a 2-byte character starts with $01..$0B, NEXT = 2 rows down)
-; and puts MARK_TILE on the n-th blank when the n-th species byte after the string's end is caught
-DrawMarks:
-	ld a, l
-	ld [wMarkLine], a
-	ld a, h
-	ld [wMarkLine + 1], a
-	push de
+	add a
+	add e
+	ld e, a
+	ld d, 0
+	add hl, de
+	call FarWord                       ; title
+	push hl
+	hlcoord 2, 2
+	ld a, [wGuideSpecies]
+	call FarPlaceString
+	pop hl
+	call FarWord                       ; body
+	push hl
+	hlcoord 1, WILD_BODY_ROW
+	ld a, [wGuideSpecies]
+	call FarPlaceString
+	pop hl
+	call FarWord                       ; marks
 	ld h, d
 	ld l, e
-.end
-	ld a, [hli]
-	cp $50
-	jr z, .end_found
-	dec a
-	cp $0B
-	jr nc, .end
+.mark
+	ld a, [wGuideSpecies]
+	call GetFarByte
+	cp $FF
+	jr z, .marks_done
 	inc hl
-	jr .end
-.end_found
-	ld a, l
-	ld [wMarkSpecies], a
-	ld a, h
-	ld [wMarkSpecies + 1], a
-	pop de
-	ld a, [wMarkLine]
-	ld l, a
-	ld a, [wMarkLine + 1]
-	ld h, a
-.loop
-	ld a, [de]
-	inc de
-	cp $50
-	ret z
-	cp NEXT_CHAR
-	jr nz, .char
-	ld a, [wMarkLine]
-	add SCREEN_W * 2
-	ld [wMarkLine], a
-	ld l, a
-	ld a, [wMarkLine + 1]
-	adc 0
-	ld [wMarkLine + 1], a
-	ld h, a
-	jr .loop
-.char
-	cp $7F
-	jr z, .blank
-	dec a
-	cp $0B
-	jr nc, .one
-	inc de                             ; second byte of a 2-byte character
-.one
-	inc hl
-	jr .loop
-.blank
-	push de
 	push hl
-	ld hl, wMarkSpecies
-	ld a, [hli]
-	ld h, [hl]
-	ld l, a
-	ld a, [hli]
-	ld b, a
-	ld a, l
-	ld [wMarkSpecies], a
-	ld a, h
-	ld [wMarkSpecies + 1], a
-	ld a, b
+	ld hl, wTilemap + SCREEN_W * WILD_BODY_ROW + 1
+	ld de, SCREEN_W * 2
+	and a
+.row
+	jr z, .at_row
+	add hl, de
 	dec a
-	call CheckCaught                   ; nz when caught
+	jr .row
+.at_row
+	ld b, h
+	ld c, l
 	pop hl
-	pop de
-	jr z, .one
-	ld [hl], MARK_TILE
-	jr .one
+	ld a, [wGuideSpecies]
+	call GetFarByte                    ; species
+	inc hl
+	push hl
+	push bc
+	dec a
+	call CheckCaught
+	pop bc
+	pop hl
+	jr z, .mark
+	ld a, MARK_TILE
+	ld [bc], a
+	jr .mark
+.marks_done
+	pop bc
+	ld a, c
+	inc a
+	ld hl, wGuideLines
+	cp [hl]                            ; carry when c + 1 < pages
+	ret
 
-FindWild:                              ; b = map group, c = map number -> hl = its 5 pointers (nc) or carry
+FarWord:                               ; de = the word at [wGuideSpecies]:hl, hl += 2
+	ld a, [wGuideSpecies]
+	call GetFarByte
+	ld e, a
+	inc hl
+	ld a, [wGuideSpecies]
+	call GetFarByte
+	ld d, a
+	inc hl
+	ret
+
+FindWild:                              ; b = map group, c = map number -> hl = its bank byte (nc) or carry
 	ld hl, WildIndex
 .loop
 	ld a, [hli]
@@ -434,12 +397,15 @@ FindWild:                              ; b = map group, c = map number -> hl = i
 	ld a, [hli]
 	cp c
 	ret z                              ; (carry clear: cp gave equal)
-	ld de, 10
-	add hl, de
+	inc hl
+	inc hl
+	inc hl
 	jr .loop
 .skip1
-	ld de, 11
-	add hl, de
+	inc hl
+	inc hl
+	inc hl
+	inc hl
 	jr .loop
 .none
 	scf
@@ -689,3 +655,18 @@ CheckCaught:                           ; a = species - 1 -> nz when caught
 	ret
 
 INCLUDE "guide_data.inc"
+
+; bank 0 (free bytes): place a string of another ROM bank — the guide bank cannot switch itself out
+SECTION "KRGuideHome", ROM0[HOME_FREE]
+FarPlaceString:                        ; a = bank, de = string, hl = tilemap
+	ld b, a
+	ldh a, [hROMBank]
+	push af
+	ld a, b
+	rst $10                            ; Bankswitch
+	call PlaceString
+	pop af
+	rst $10
+	ret
+
+INCLUDE "wild_data.inc"
