@@ -21,6 +21,8 @@ New routines go into the zero-filled tail of the bank that calls them.
   Elm text).
 - sure hit: the player's moves skip the accuracy roll (opponent moves, Protect, Fly/Dig, Lock-On, Dream Eater and
   substitute drain checks unchanged) — BattleCommand_CheckHit's X Accuracy check returns 'always hit' on the player's turn.
+- exp text: the gained exp prints with 5 digits (5x exp passes 9999). Elm's party menu reloads the font first
+  (the Korean text overwrote the digit tiles).
 - guide menu: START menu '공략' (tools/kr_guide.py, Korean text with tools/kr_charset.py).
 - caught mark: the wild battle HUD already puts tile $5D (9th tile of the exp bar graphics) at hlcoord 1,1 when the species
   is caught (DrawEnemyHUDBorder, same as English), but in the Korean HUD it is a thin 6x6 outline right above the box's
@@ -492,6 +494,16 @@ def patch_caught_ball(r):
     r.put("caught ball: tile $5D", tile, old, b"".join(bytes([v, v]) for v in CAUGHT_BALL))
 
 
+def patch_exp_digits(r):
+    """'<n> 경험치를 얻었다!' (normal and boosted text, bank $64) prints wStringBuffer2 with 4 digits; with 5x exp the gain
+    passes 9999 and the 5th digit came out as a broken tile (user report 2026-11-23) — 5 digits (the value is 2 bytes)."""
+    import re
+    hits = [m.start() for m in re.finditer(re.escape(bytes.fromhex("5a50094bd02400")), bytes(r.d))]
+    assert len(hits) == 2 and all(h // 0x4000 == 0x64 for h in hits), hits
+    for h in hits:
+        r.put("exp text: 5 digits", h + 5, [0x24], [0x25])
+
+
 def patch_trade_shiny(r):
     t = r.find("trades: table", "00 60 42 ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? 37 66")
     for k in range(6):
@@ -540,8 +552,14 @@ def patch_elm_trade_evo(r):
     sel_b, sel = k["SelectMonFromParty"]
     evo_b, evo = k["EvolvePokemon"]
     ptr_b, ptrs = k["EvosAttacksPointers"]
+    # The Korean text engine draws Hangul glyphs into font tiles (Elm's question overwrites the digits 8 and 9), and
+    # SelectMonFromParty does not reload the font, so the party menu showed broken levels and HP (user report
+    # 2026-11-21). The START menu reloads it with LoadFonts_NoOAMUpdate (bank 1; Gold and Silver addresses differ).
+    fonts = r.find("LoadFonts_NoOAMUpdate", "F0 ?? F5 3E 01 E0 ?? CD ?? ?? F1 E0 ?? C9 CD ?? ?? 3E 90 E0 ?? CD ?? ?? CD ?? ?? C9")
+    assert fonts // 0x4000 == 1
     routine = alloc_tail(r, "ElmTradeEvolution", bank, lambda org: asm([
         0xAF, 0xEA, *lo_hi(k["wScriptVar"]),
+        0x3E, 0x01, 0x21, *lo_hi(gb_addr(fonts)), 0xCF,             # farcall LoadFonts_NoOAMUpdate
         0x3E, sel_b, 0x21, *lo_hi(sel), 0xCF, 0xD8,                  # farcall SelectMonFromParty / ret c
         0xFA, *lo_hi(k["wCurPartySpecies"]), 0xFE, EGG, ("jr", 0x28, "cannot"),
         0x3D, 0x4F, 0x06, 0x00, 0x21, *lo_hi(ptrs), 0x09, 0x09, 0x3E, ptr_b, 0xCD, *lo_hi(k["GetFarWord"]),
@@ -681,6 +699,7 @@ def main():
     patch_route1_kanto_starters(r)
     patch_trade_shiny(r)
     patch_caught_ball(r)
+    patch_exp_digits(r)
     patch_guide(r, wild_start, en_rom, en_sym, args.repo)
     fix_global_checksum(r.d)
     Path(args.out).write_bytes(bytes(r.d))
