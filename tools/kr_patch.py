@@ -304,7 +304,7 @@ def wild_maps(data, start):
 MAP_GROUP_POINTERS = (0x25, 0x40ED)  # same place in both ROMs
 LEGEND_MAPS = {  # map: (group, number), as in constants/map_constants.asm
     "SeafoamGym": (6, 4), "PowerPlant": (7, 10), "VictoryRoad": (3, 82),
-    "CeruleanCity": (7, 17), "VermilionCity": (12, 3), "IlexForest": (3, 44),
+    "SilverCaveRoom3": (3, 68), "VermilionCity": (12, 3), "IlexForest": (3, 44),
 }
 
 
@@ -567,7 +567,8 @@ def patch_outdoor_sprites(r):
     """Vermilion City Mew (legend object, SPRITE_FAIRY) showed as the player: outdoor maps load only their map group's
     11-sprite list (AddOutdoorSprites), and the Vermilion group's has no SPRITE_FAIRY — slot SPRITE_BIKER, which no outdoor
     map of the group uses (Route 6, Route 11, Vermilion City), becomes SPRITE_FAIRY (same as data/maps/outdoor_sprites.asm).
-    The Cerulean group (Cerulean City Mewtwo, SPRITE_MONSTER) has no unused slot: all 11 are used by Route 4/9/24/25 and the city."""
+    Mewtwo is no longer outdoors (moved from Cerulean City to Silver Cave Room 3 — LEGEND_MAPS), so the Cerulean group
+    (all 11 slots used by Route 4/9/24/25 and the city) stays as it is."""
     code = r.find("outdoor sprites: AddOutdoorSprites", "FA ?? ?? 3D 4F 06 00 21 8C 46 09 09")   # ld hl, OutdoorSprites (05:468C, same in both ROMs)
     table = (code // 0x4000) * 0x4000 + (r.d[code + 8] | r.d[code + 9] << 8) - 0x4000
     g = table + 2 * (12 - 1)   # MAPGROUP_VERMILION = 12
