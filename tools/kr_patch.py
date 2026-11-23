@@ -560,6 +560,21 @@ def patch_credits(r):
         0xD1, 0xE1, 0xC9]))                            # pop de / pop hl / ret
 
 
+SPRITE_BIKER, SPRITE_FAIRY = 0x4A, 0x4D   # constants/sprite_constants.asm
+
+
+def patch_outdoor_sprites(r):
+    """Vermilion City Mew (legend object, SPRITE_FAIRY) showed as the player: outdoor maps load only their map group's
+    11-sprite list (AddOutdoorSprites), and the Vermilion group's has no SPRITE_FAIRY — slot SPRITE_BIKER, which no outdoor
+    map of the group uses (Route 6, Route 11, Vermilion City), becomes SPRITE_FAIRY (same as data/maps/outdoor_sprites.asm).
+    The Cerulean group (Cerulean City Mewtwo, SPRITE_MONSTER) has no unused slot: all 11 are used by Route 4/9/24/25 and the city."""
+    code = r.find("outdoor sprites: AddOutdoorSprites", "FA ?? ?? 3D 4F 06 00 21 8C 46 09 09")   # ld hl, OutdoorSprites (05:468C, same in both ROMs)
+    table = (code // 0x4000) * 0x4000 + (r.d[code + 8] | r.d[code + 9] << 8) - 0x4000
+    g = table + 2 * (12 - 1)   # MAPGROUP_VERMILION = 12
+    lst = (code // 0x4000) * 0x4000 + (r.d[g] | r.d[g + 1] << 8) - 0x4000
+    r.put("outdoor sprites: Vermilion SPRITE_BIKER -> SPRITE_FAIRY", lst + 8, [SPRITE_BIKER], [SPRITE_FAIRY])
+
+
 def patch_trade_shiny(r):
     t = r.find("trades: table", "00 60 42 ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? 37 66")
     for k in range(6):
@@ -757,6 +772,7 @@ def main():
     patch_caught_ball(r)
     patch_exp_digits(r)
     patch_credits(r)
+    patch_outdoor_sprites(r)
     patch_guide(r, wild_start, en_rom, en_sym, args.repo)
     fix_global_checksum(r.d)
     Path(args.out).write_bytes(bytes(r.d))

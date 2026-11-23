@@ -145,7 +145,7 @@ VermilionGroupSprites:
 	db SPRITE_TEACHER
 	db SPRITE_SUPER_NERD
 	db SPRITE_BIG_SNORLAX
-	db SPRITE_BIKER
+	db SPRITE_FAIRY ; mod: Mew in Vermilion City (no outdoor map of this group uses SPRITE_BIKER)
 	db SPRITE_POKE_BALL
 	db SPRITE_FRUIT_TREE
 
