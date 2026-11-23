@@ -735,6 +735,26 @@ def patch_wild_src(r, en_rom, en_sym, version, repo, base_ref="origin/master"):
     return kr_start
 
 
+DIGLETTS_CAVE = (3, 75)              # map group, number (constants/map_constants.asm)
+DIGLETTS_CAVE_RATE = 10 * 0xFF // 100  # 10 percent morn/day/nite (data/wild/kanto_grass.asm)
+
+
+def patch_digletts_cave_rate(r, wild_start):
+    """Diglett's Cave walking encounter rate 4/2/8 percent -> 10 percent at every time of day (user 2026-11-24: Diglett hardly
+    ever appeared). patch_wild_src copies species only, so the rate bytes of the grass entry are set here."""
+    o, kind = wild_start, 0
+    while True:
+        if r.d[o] == 0xFF:
+            kind += 1
+            assert kind < 3, "Diglett's Cave grass entry not found"
+            o += 1
+            continue
+        if kind == 2 and (r.d[o], r.d[o + 1]) == DIGLETTS_CAVE:
+            break
+        o += 47 if kind in (0, 2) else 9
+    r.put("Diglett's Cave: encounter rates", o + 2, r.d[o + 2:o + 5], [DIGLETTS_CAVE_RATE] * 3)
+
+
 def fix_global_checksum(d):
     s = (sum(d) - d[0x14E] - d[0x14F]) & 0xFFFF
     d[0x14E], d[0x14F] = s >> 8, s & 0xFF
@@ -759,6 +779,7 @@ def main():
     patch_exp(r)
     patch_sure_hit(r)
     wild_start = patch_wild_src(r, en_rom, en_sym, version, args.repo)
+    patch_digletts_cave_rate(r, wild_start)
     patch_legends(r, en_rom)
     patch_exp5(r)
     patch_money5(r)
