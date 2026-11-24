@@ -263,6 +263,8 @@ class Facts:
         names |= {c for (k, c), _ in GOALS} | {"EVENT_RELEASED_THE_BEASTS", "NUM_LANDMARKS"}
         self.legends = D.legends(self.repo, LEGEND_ORDER)
         names |= {f for *_, f in self.legends}
+        self.towns = D.town_npcs(self.repo)
+        names |= {r["a"] for r in self.towns if r["kind"] == "item"}
         self.C = D.consts(self.repo, names)
         self.place = D.landmark_names(self.en, self.sym, d, self.C["NUM_LANDMARKS"])
         self.landmark_of = {(g, n): self.C[lm] for g, n, lm, _ in self.maps.values()}
@@ -510,6 +512,70 @@ def wild_pages(sections, place, names, enc, single):
     return out
 
 
+# 마을 소개(사용자 지시 2026-11-24): 지금 맵의 지역(랜드마크)에 있는 쓸모 있는 NPC(kr_guide_data.town_npcs) — 사람마다 두 줄(무엇 / 자리),
+# 한 화면 세 사람. 이름은 이 ROM의 표(종 mon_names·도구 item_names), 관장·사천왕은 한국어판 이름(공략 다음 목표와 같은 표기)
+TOWN_PER_SCREEN = 3
+TOWN_TRAINERS = {"FALKNER": "비상", "BUGSY": "호일", "WHITNEY": "꼭두", "MORTY": "유빈", "CHUCK": "사도", "JASMINE": "규리",
+                 "PRYCE": "류옹", "CLAIR": "이향", "BROCK": "웅", "MISTY": "이슬", "LT_SURGE": "마티스", "ERIKA": "민화",
+                 "JANINE": "도희", "SABRINA": "초련", "BLAINE": "강연", "BLUE": "그린", "WILL": "일목", "KOGA": "독수",
+                 "BRUNO": "시바", "KAREN": "카렌", "CHAMPION": "목호"}
+TOWN_LABEL = {"mart": "상점", "leader": "관장 ", "elite": "사천왕 ", "champion": "챔피언 ", "namerater": "이름 평가",
+              "daycare": "키우미집", "deleter": "기술 삭제", "kurt": "볼 만들기", "haircut": "이발(친밀도)", "egg": "알 선물"}
+
+
+def item_names(d):
+    """item id -> raw name (the NamesPointers item entry — kr_patch patch_ungchwi moves the table)"""
+    b, a = d[0x35CC], d[0x35CD] | d[0x35CE] << 8
+    o, out = b * 0x4000 + a - 0x4000, {}
+    for i in range(1, 256):
+        j = d.index(0x50, o)
+        out[i] = bytes(d[o:j])
+        o = j + 1
+    return out
+
+
+def town_pages(f, names, enc, single):
+    """{landmark: [(title, body, marks)]}"""
+    sid = {s: i + 1 for i, s in enumerate(f.species)}
+    items = item_names(f.d)
+    sp = lambda s: names[sid[s]][0]
+    asc = lambda t: bytes(single[c] for c in t)
+    by_lm = {}
+    for r in f.towns:
+        if r["map"] not in f.maps:
+            continue
+        g, n, _, _ = f.maps[r["map"]]
+        k, a, b = r["kind"], r["a"], r["b"]
+        if k in ("leader", "elite", "champion"):
+            if a not in TOWN_TRAINERS:      # a gym trainer fought by script (not the leader)
+                continue
+            what = enc(TOWN_LABEL[k]) + enc(TOWN_TRAINERS[a])
+        elif k == "gift":
+            what = enc("경품 " if "GameCorner" in r["map"] else "선물 ") + sp(a) + b"\x7f" + asc(f"Lv{b}")
+        elif k == "item":
+            what = enc("도구 ") + items[f.C[a]]
+        elif k == "trade":
+            what = enc("교환 ") + sp(a) + enc(" 주고 ") + sp(b)
+        else:
+            what = enc(TOWN_LABEL[k])
+        where = enc("  " + (r["where"] or "이 근처"))
+        assert width(what) <= WILD_COLS and width(where) <= WILD_COLS, r
+        by_lm.setdefault(f.landmark_of[(g, n)], []).append((what, where))
+    out = {}
+    for lm, rows in by_lm.items():
+        rows = list(dict.fromkeys(rows))
+        screens = [rows[i:i + TOWN_PER_SCREEN] for i in range(0, len(rows), TOWN_PER_SCREEN)]
+        pages = []
+        for k, cur in enumerate(screens):
+            num = asc(f"{k + 1}/{len(screens)}")
+            title = f.place[lm] + b"\x7f" + enc("소개")
+            title = title + b"\x7f" * (WILD_COLS - 1 - width(title) - width(num)) + num
+            body = bytes([NEXT]).join(x for w in cur for x in w)
+            pages.append((title, body, b"\xff"))
+        out[lm] = pages
+    return out
+
+
 def build_wild(f, names, enc, banks):
     """WildIndex (guide bank: db group, number, BANK / dw page list) and wild_data.inc (page lists and strings packed into the
     given empty banks); maps with identical pages (cave floors with the same table) share one block"""
@@ -528,6 +594,16 @@ def build_wild(f, names, enc, banks):
             label_of[key] = f"WildPages{len(label_of)}"
             blocks.append((label_of[key], pages))
         index.append(f"\tdb ${g:02X}, ${n:02X}, BANK({label_of[key]})\n\tdw {label_of[key]}")
+    index.append("\tdb $FF")
+    # 마을 소개: every map of a landmark that has people points at that landmark's pages (same record shape as WildIndex)
+    towns = town_pages(f, names, enc, single)
+    for lm, pages in towns.items():
+        blocks.append((f"TownPages{lm}", pages))
+    index.append("TownIndex:")
+    for g, n, lm, _ in sorted(f.maps.values()):
+        lm = f.C[lm]
+        if lm in towns:
+            index.append(f"\tdb ${g:02X}, ${n:02X}, BANK(TownPages{lm})\n\tdw TownPages{lm}")
     index.append("\tdb $FF")
     out, bank_i, used = [], 0, 0x4000
     for lb, pages in blocks:
@@ -590,7 +666,9 @@ def build_data(f, enc, wild_banks):
     lines.append("DexStrings:\n" + "\n".join(f"\tdw {label(dex[sp])}" for sp in range(1, 252)))
     texts = {
         "TxtGuideTitle": "공략",
-        "TxtMenuItems": "이 맵 출현\n전설과 환상\n다음 목표\n도감 안내",
+        "TxtMenuItems": "이 맵 출현\n전설과 환상\n다음 목표\n도감 안내\n마을 소개",
+        "TxtTownTitle": "마을 소개",
+        "TxtNoTown": "이곳에는 소개할\n사람이 없다",
         "TxtWildTitle": "이 맵 출현",
         "TxtNoWild": "야생 포켓몬이 없다",
         "TxtLegendTitle": "전설과 환상",
@@ -601,7 +679,7 @@ def build_data(f, enc, wild_banks):
         "TxtDexAll": "모두 잡았다!",
     }
     released = f.flag("event", "EVENT_RELEASED_THE_BEASTS")
-    out = ["DEF NUM_PAGES EQU 4", f"DEF RELEASED_ADDR EQU ${released[0]:04X}", f"DEF RELEASED_MASK EQU ${released[1]:02X}"]
+    out = ["DEF NUM_PAGES EQU 5", f"DEF RELEASED_ADDR EQU ${released[0]:04X}", f"DEF RELEASED_MASK EQU ${released[1]:02X}"]
     out += [f"{k}:\n{db(enc(v) + bytes([0x50]))}" for k, v in texts.items()]
     wild_index, wild_data, used_banks, counts = build_wild(f, names, enc, wild_banks)
     out += [wild_index] + lines + strings

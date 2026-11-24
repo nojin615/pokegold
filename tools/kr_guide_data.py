@@ -257,3 +257,115 @@ def evolutions(en, sym):
             o += n
         out[s] = evos
     return out
+
+
+# ---- 마을 소개(사용자 지시 2026-11-24 — 3세대 판들의 '마을 소개' 탭과 같게, REA_repo tools/firered_guide/town_npcs.py 규칙) ----
+# 오브젝트(object_event … 스크립트 이름표)의 스크립트 블록(그 이름표부터 다음 맨 앞 이름표까지 + 같은 파일 안 sjump·scall로 닿는 블록)에서:
+# pokemart 상점 · 체육관 맵 loadtrainer 관장 · 사천왕 방·챔피언 방 · givepoke·special GiveShuckle 선물 · giveegg 알 · giveitem·verbosegiveitem 도구
+# · trade 교환(npc_trades.asm) · special NameRater 이름 평가 · DayCareMan 키우미집 · MoveDeletion 기술 삭제 · SelectApricornForKurt 볼 만들기
+# · Older/YoungerHaircutBrother 이발(친밀도). 같은 도구를 5곳 이상에서 주는 것은 공통 직원이라 뺀다
+TOWN_OUTDOOR = re.compile(r"Route\d+|\w+City|\w+Town|CinnabarIsland|IndigoPlateau|LakeOfRage|SilverCaveOutside")
+TOWN_BUILD = [("Pokecenter", "포켓몬센터"), ("PokeCenter", "포켓몬센터"), ("Mart", "프렌들리숍"), ("Gym", "체육관"),
+              ("DeptStore", "백화점"), ("House", "집")]
+TOWN_DIRS = [["북서쪽", "북쪽", "북동쪽"], ["서쪽", "가운데", "동쪽"], ["남서쪽", "남쪽", "남동쪽"]]
+TOWN_ELITE = {"WillsRoom": "elite", "KogasRoom": "elite", "BrunosRoom": "elite", "KarensRoom": "elite", "LancesRoom": "champion"}
+TOWN_SPECIAL = {"NameRater": "namerater", "DayCareMan": "daycare", "MoveDeletion": "deleter", "SelectApricornForKurt": "kurt",
+                "OlderHaircutBrother": "haircut", "YoungerHaircutBrother": "haircut"}
+
+
+def town_npcs(repo):
+    """[{map, kind, a, b, where}] — a, b: SPECIES·ITEM 이름(교환은 a = 주는 종·b = 받는 종), 관장 등은 a = 트레이너 클래스"""
+    norm = lambda s: s.replace("_", "").lower()
+    dims = {norm(c): (int(w) * 2, int(h) * 2) for c, w, h in
+            re.findall(r"map_const\s+(\w+),\s*(\d+),\s*(\d+)", (repo / "constants/map_constants.asm").read_text(encoding="utf-8"))}
+    trade_rows = re.findall(r"^\s*npctrade \w+,\s*(\w+),\s*(\w+),", (repo / "data/events/npc_trades.asm").read_text(encoding="utf-8"), re.M)
+    trade_order = re.findall(r"^\s*const (NPC_TRADE_\w+)", (repo / "constants/npc_trade_constants.asm").read_text(encoding="utf-8"), re.M)
+    texts, objs, warps = {}, {}, {}
+    for f in sorted((repo / "maps").glob("*.asm")):
+        t = f.read_text(encoding="utf-8")
+        texts[f.stem] = t
+        objs[f.stem] = re.findall(r"^\s*object_event\s+(\d+),\s*(\d+),.*?,\s*(\w+),\s*[-\w]+\s*$", t, re.M)
+        warps[f.stem] = re.findall(r"^\s*warp_event\s+(\d+),\s*(\d+),\s*(\w+),", t, re.M)
+    by_norm = {norm(n): n for n in texts}
+    outdoor = {n for n in texts if TOWN_OUTDOOR.fullmatch(n)}
+    entry = {}
+    for n in sorted(outdoor):
+        for x, y, dest in warps[n]:
+            d = by_norm.get(norm(dest))
+            if d and d not in outdoor and d not in entry:
+                entry[d] = (n, int(x), int(y))
+    changed = True
+    while changed:
+        changed = False
+        for n in sorted(texts):
+            if n in entry:
+                for x, y, dest in warps[n]:
+                    d = by_norm.get(norm(dest))
+                    if d and d not in outdoor and d not in entry:
+                        entry[d] = entry[n]
+                        changed = True
+
+    def blocks(t):
+        marks = [(m.start(), m.end(), m.group(1)) for m in re.finditer(r"^(\w+):{1,2}", t, re.M)]
+        return {name: t[e:marks[i + 1][0] if i + 1 < len(marks) else len(t)] for i, (s, e, name) in enumerate(marks)}
+    rows = []
+    for n, ol in objs.items():
+        bl = blocks(texts[n])
+        for x, y, script in ol:
+            if script not in bl:
+                continue
+            body, seen, todo = "", set(), [script]
+            while todo:
+                lb = todo.pop()
+                if lb in seen or lb not in bl:
+                    continue
+                seen.add(lb)
+                body += bl[lb]
+                todo += re.findall(r"^\s*(?:sjump|scall|sjumpfwd)\s+(\w+)", bl[lb], re.M)
+            found = []
+            if re.search(r"^\s*pokemart\s", body, re.M):
+                found.append(("mart", "", ""))
+            for cls in re.findall(r"^\s*loadtrainer (\w+),", body, re.M):
+                if n.endswith("Gym"):
+                    found.append(("leader", cls, ""))
+                elif n in TOWN_ELITE:
+                    found.append((TOWN_ELITE[n], cls, ""))
+            for sp, lv in re.findall(r"^\s*givepoke (\w+),\s*(\d+)", body, re.M):
+                found.append(("gift", sp, lv))
+            if re.search(r"special GiveShuckle", body):
+                found.append(("gift", "SHUCKLE", "15"))
+            for sp in re.findall(r"^\s*giveegg (\w+)", body, re.M):
+                found.append(("egg", sp, ""))
+            for it in re.findall(r"^\s*(?:verbose)?giveitem (\w+)", body, re.M):
+                found.append(("item", it, ""))
+            for tr in re.findall(r"^\s*trade (NPC_TRADE_\w+)", body, re.M):
+                want, give = trade_rows[trade_order.index(tr)]
+                found.append(("trade", want, give))
+            for sp, kind in TOWN_SPECIAL.items():
+                if re.search(rf"special {sp}\b", body):
+                    found.append((kind, "", ""))
+            for kind, a, b in dict.fromkeys(found):
+                rows.append({"map": n, "kind": kind, "a": a, "b": b, "obj": (int(x), int(y))})
+    common = Counter(r["a"] for r in rows if r["kind"] == "item")
+    rows = [r for r in rows if not (r["kind"] == "item" and common[r["a"]] >= 5)]
+    bk = lambda m: next((k for key, k in TOWN_BUILD if key in m), "건물")
+    for r in rows:
+        n = r["map"]
+        if n in outdoor:
+            w, h = dims.get(norm(n), (20, 18))
+            x, y = r["obj"]
+            r["where"] = TOWN_DIRS[min(2, y * 3 // max(h, 1))][min(2, x * 3 // max(w, 1))]
+            continue
+        if n not in entry:
+            r["where"] = ""
+            continue
+        town, ex, ey = entry[n]
+        w, h = dims.get(norm(town), (20, 18))
+        kind = bk(n)
+        others = {entry[d][1:] for d in entry if entry[d][0] == town and d != n and bk(d) == kind} - {(ex, ey)}
+        where = kind if not others and kind != "건물" else f"{TOWN_DIRS[min(2, ey * 3 // max(h, 1))][min(2, ex * 3 // max(w, 1))]} {kind}"
+        fl = re.search(r"(B?)(\d)F$", n)
+        if fl:
+            where += f" 지하 {fl.group(2)}층" if fl.group(1) else f" {fl.group(2)}층"
+        r["where"] = where
+    return rows

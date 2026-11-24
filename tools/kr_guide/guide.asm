@@ -213,7 +213,7 @@ OpenPage:                              ; a = page
 	ld l, a
 	jp hl
 .pages
-	dw PageWild, PageLegends, PageGoal, PageDex
+	dw PageWild, PageLegends, PageGoal, PageDex, PageTown
 
 ; hl = draw routine (c = screen, returns carry when there are more screens after it)
 Pager:
@@ -273,16 +273,47 @@ Pager:
 ; bank and the page list (db pages / per page dw title, body, marks); each screen is drawn with FarPlaceString (bank 0) and the
 ; marks list (db line, species ... $FF) puts MARK_TILE before every caught species (column 1 of body line `line`)
 PageWild:
+	ld hl, WildIndex
+	ld de, .texts
+	jr PageIndexed
+.texts
+	dw TxtWildTitle, TxtNoWild
+
+; 마을 소개: the same page lists, found in TownIndex (every map of a landmark with people points at its pages — kr_guide.py town_pages)
+PageTown:
+	ld hl, TownIndex
+	ld de, .texts
+	jr PageIndexed
+.texts
+	dw TxtTownTitle, TxtNoTown
+
+PageIndexed:                           ; hl = index (WildIndex / TownIndex), de = (title, no-entry text)
+	push de
 	ld a, [wMapGroup]
 	ld b, a
 	ld a, [wMapNumber]
 	ld c, a
-	call FindWild
+	call FindIn
+	pop de
 	jr nc, .found
-	ld de, TxtWildTitle
+	ld a, [de]
+	ld l, a
+	inc de
+	ld a, [de]
+	ld h, a
+	inc de
+	push de
+	ld d, h
+	ld e, l
 	call FrameTitle
+	pop de
+	ld a, [de]
+	ld l, a
+	inc de
+	ld a, [de]
+	ld d, a
+	ld e, l
 	hlcoord 2, 5
-	ld de, TxtNoWild
 	call PlaceString
 	call WaitBGMap
 	jp WaitAB
@@ -388,6 +419,7 @@ FarWord:                               ; de = the word at [wGuideSpecies]:hl, hl
 
 FindWild:                              ; b = map group, c = map number -> hl = its bank byte (nc) or carry
 	ld hl, WildIndex
+FindIn:                                ; hl = index
 .loop
 	ld a, [hli]
 	cp $ff
