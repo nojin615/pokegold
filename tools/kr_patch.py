@@ -630,6 +630,82 @@ def patch_even_odds(r):
     r.put("even odds", off + 1, r.d[off + 1:off + 22], first)
 
 
+def even_list_pick(rnd, back, entry_size, terminal, key_level):
+    """asm items: hl = list of `entry_size`-byte entries (chance, species, level[, …]) — pick an entry so that every
+    distinct key (species; with key_level, species 0 = a time group also keyed by its level byte) has the same chance:
+    a random entry, kept with chance 1/(entries with the same key) (as patch_even_odds). `terminal`: 'last' = the
+    entry whose chance byte is 0xFF is the last one (fishing, cumulative 100 percent), 'end' = an 0xFF entry ends the
+    list and is not one (TreeMons -1). Jumps to `back` with hl = the picked entry's chance byte."""
+    skip = [0x23] * (entry_size - 1)
+    if terminal == "last":
+        count = ["cnt:", 0x2A, *skip, 0x04, 0x3C, ("jr", 0x20, "cnt")]                 # ld a,[hli] / skip / inc b / inc a
+    else:
+        count = ["cnt:", 0x7E, 0x3C, ("jr", 0x28, "cntd"), *([0x23] * entry_size), 0x04, ("jr", 0x18, "cnt"), "cntd:"]
+    same = [0x23, 0x2A, 0xBA, ("jr", 0x20, "nk")]                                     # inc hl / ld a,[hli] / cp d / jr nz
+    if key_level:
+        same += [0xA7, ("jr", 0x20, "y"), 0x7E, 0xBB, ("jr", 0x20, "nk")]             # and a / jr nz,.y / ld a,[hl] / cp e
+    mul = [0x87, 0x81] if entry_size == 3 else [0x87, 0x87, 0x91]                     # a*3 / a*4 - 1 … (only 3 used)
+    assert entry_size == 3
+    return [
+        0xE5, 0x06, 0x00, *count,                                    # push hl (list) / b = number of entries
+        0x78, 0xA7, ("jr", 0x20, "pick"), 0xE1, 0xC3, *lo_hi(back),  # none: hl = list (its 0xFF ends it)
+        "pick:", 0xCD, *lo_hi(rnd), 0xE6, 0x07, 0xB8, ("jr", 0x30, "pick"),
+        0xE1, 0xE5, 0x4F, *mul, 0x5F, 0x16, 0x00, 0x19, 0xE5,       # hl = list + 3 * index, push entry
+        0x23, 0x2A, 0x57, 0x5E,                                      # d = species, e = level
+        0xF8, 0x02, 0x2A, 0x66, 0x6F,                                # hl = list (ld hl,sp+2)
+        0xC5, 0x0E, 0x00,                                            # push bc / c = same-key count
+        "k:", *same, "y:", 0x0C, "nk:", *([0x23] * (entry_size - 2)), 0x05, ("jr", 0x20, "k"),
+        0xCD, *lo_hi(rnd),
+        "mod:", 0xB9, ("jr", 0x38, "md"), 0x91, ("jr", 0x18, "mod"),  # a mod c
+        "md:", 0xC1, 0xE1, 0xA7, ("jr", 0x20, "pick"),                # pop bc / pop hl (entry) / not 0 → again
+        0xD1, 0xC3, *lo_hi(back),                                    # pop de (list) / jp back
+    ]
+
+
+def even_fish_pick(rnd, back, tfg, tod):
+    """Fishing: like even_list_pick, but an entry's key is its species now — a time-group entry (species 0) is resolved
+    through TimeFishGroups with the time of day as .TimeEncounter does, so a time group's species that is also a normal
+    entry of the rod is not counted twice (Route 42 Good Rod: Goldeen would be 2/3)."""
+    return [
+        0xE5, 0x06, 0x00, "cnt:", 0x2A, 0x23, 0x23, 0x04, 0x3C, ("jr", 0x20, "cnt"),   # push hl / b = entries
+        "pick:", 0xCD, *lo_hi(rnd), 0xE6, 0x07, 0xB8, ("jr", 0x30, "pick"),
+        0xE1, 0xE5, 0x4F, 0x87, 0x81, 0x5F, 0x16, 0x00, 0x19, 0xE5,                  # hl = entry, push entry
+        0xCD, ("abs", "key"), 0x57,                                                   # d = its species now
+        0xF8, 0x02, 0x2A, 0x66, 0x6F, 0xC5, 0x0E, 0x00,                               # hl = list / push bc / c = 0
+        "k:", 0xCD, ("abs", "key"), 0xBA, ("jr", 0x20, "nk"), 0x0C,                   # same species: c++
+        "nk:", 0x23, 0x23, 0x23, 0x05, ("jr", 0x20, "k"),
+        0xCD, *lo_hi(rnd),
+        "mod:", 0xB9, ("jr", 0x38, "md"), 0x91, ("jr", 0x18, "mod"),
+        "md:", 0xC1, 0xE1, 0xA7, ("jr", 0x20, "pick"),
+        0xD1, 0xC3, *lo_hi(back),
+        # key: hl = entry → a = species (time group by the time of day); hl, de kept
+        "key:", 0xE5, 0x23, 0x2A, 0xA7, ("jr", 0x20, "kr"), 0xD5, 0x5E, 0x16, 0x00,
+        0x21, *lo_hi(tfg), 0x19, 0x19, 0x19, 0x19,
+        0xFA, *lo_hi(tod), 0xE6, 0x03, 0xFE, 0x02, ("jr", 0x38, "kt"), 0x23, 0x23,
+        "kt:", 0x7E, 0xD1, "kr:", 0xE1, 0xC9,
+    ]
+
+
+def patch_even_fish_tree(r):
+    """Fishing (Fish.loop) and headbutt / Rock Smash (SelectTreeMon.loop) picked by each entry's chance; now every
+    distinct species of the rod's or tree's list has the same chance, as grass and water (user report 2026-11-24 —
+    the 'this map' guide page showed 좋은낚싯대 35/35/20/10). Time-group fishing entries (species 0) count by their
+    group (level byte)."""
+    rnd = KR2["Random"]
+    fish = r.find("Fish .loop", "CD 3B 31 BE 28 07 38 05 23 23 23 18 F6 23 2A 57 A7 CC")
+    back = gb_addr(fish + 13)                                        # .ok: inc hl (hl = chance byte)
+    te = fish + 18                                                   # call z, .TimeEncounter (operand)
+    te = (fish // 0x4000) * 0x4000 + (r.d[te] | r.d[te + 1] << 8) - 0x4000
+    assert r.d[te:te + 3] == bytes([0x5E, 0x16, 0x00]) and r.d[te + 3] == 0x21 and r.d[te + 10] == 0xFA, "fish .TimeEncounter"
+    tfg, tod = r.d[te + 4] | r.d[te + 5] << 8, r.d[te + 11] | r.d[te + 12] << 8   # TimeFishGroups, wTimeOfDay
+    t = alloc_tail(r, "even fishing", fish // 0x4000, lambda org: asm(even_fish_pick(rnd, back, tfg, tod), org))
+    r.put("even fishing", fish, r.d[fish:fish + 13], [0xC3, *lo_hi(t)])
+    tree = r.find("SelectTreeMon .loop", "3E 64 CD ?? ?? 96 38 05 23 23 23 18 F8 2A FE FF")
+    back = gb_addr(tree + 13)                                        # .ok: ld a,[hli] / cp -1
+    t = alloc_tail(r, "even trees", tree // 0x4000, lambda org: asm(even_list_pick(rnd, back, 3, "end", False), org))
+    r.put("even trees", tree, r.d[tree:tree + 13], [0xC3, *lo_hi(t)])
+
+
 def patch_elm_trade_evo(r):
     k = KR2
     bank = 0x60
@@ -948,6 +1024,7 @@ def main():
     patch_money5(r)
     patch_catch(r)
     patch_even_odds(r)
+    patch_even_fish_tree(r)
     patch_elm_trade_evo(r)
     patch_ungchwi(r)
     patch_fossil_gift(r)

@@ -366,7 +366,7 @@ def map_environments(repo):
 def fish_rods(repo):
     """({fishgroup 1-based: [old, good, super]}, [time groups (day SPECIES, level, nite SPECIES, level)]) — each rod a list of
     (percent, SPECIES or ('time', n), level); an entry's chance is its cumulative percent minus the one before
-    (data/wild/fish.asm — 'percent + 1' is rounding). Fishing has no even-odds mod: these are the original chances"""
+    (data/wild/fish.asm — 'percent + 1' is rounding). The game picks evenly (kr_patch patch_even_fish_tree) — wild_sections shows that"""
     text = (Path(repo) / "data/wild/fish.asm").read_text(encoding="utf-8")
     table = re.findall(r"^\s*fishgroup [^,]+, (\.\w+),\s*(\.\w+),\s*(\.\w+)", text, re.M)
     blocks, cur, times, in_time = {}, None, [], False
@@ -440,7 +440,8 @@ def wild_sections(f, g, n, env, fish, ftimes):
         out.append(("파도타기", even(water[(g, n)])))
         for rod, label in zip(fish.get(f.fishgroup_of.get((g, n)), ()), ("낡은낚싯대", "좋은낚싯대", "대단한낚싯대")):
             day, nite = [], []
-            for pct, what, lv in rod:
+            for _, what, lv in rod:
+                pct = 0
                 if isinstance(what, tuple):
                     ds, dl, ns, nl = ftimes[what[1]]
                     day.append((pct, sid[ds], dl))
@@ -448,7 +449,9 @@ def wild_sections(f, g, n, env, fish, ftimes):
                 else:
                     day.append((pct, sid[what], lv))
                     nite.append((pct, sid[what], lv))
-            d, nt = merge(day), merge(nite)
+            # every distinct species of the rod (time groups resolved) has the same chance — kr_patch patch_even_fish_tree,
+            # user report 2026-11-24
+            d, nt = ([(sp, lo, hi, 100 // len(rows)) for sp, lo, hi, _ in rows] for rows in (merge(day), merge(nite)))
             out += [(label, d)] if d == nt else [(f"{label} 아침·낮", d), (f"{label} 밤", nt)]
     return out
 
