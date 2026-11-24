@@ -57,7 +57,7 @@ GOALS = [
     (("event", "EVENT_CLEARED_RADIO_TOWER"), "금빛시티 라디오타워의\n로켓단을 쫓아내자"),
     (("johto", "RISINGBADGE"), "검은먹시티 체육관\n관장 이향을 이기고\n용의 굴 시험을\n마치자"),
     (("event", "EVENT_BEAT_ELITE_FOUR"), "연두마을 동쪽\n27번 도로로 가서\n석영고원 사천왕과\n챔피언을 이기자"),
-    (("event", "EVENT_GOT_SS_TICKET_FROM_ELM"), "연두마을 공박사에게\n승선 티켓을 받자"),
+    (("event", "EVENT_GOT_SS_TICKET_FROM_ELM"), "연두마을 공박사에게\n승선 티켓을 받자\n(다시 말 걸면\n웅취도 준다)"),
     (("kanto", "THUNDERBADGE"), "담청시티 항구에서\n쾌속선을 타고\n갈색시티 체육관\n관장 마티스를 이기자"),
     (("event", "EVENT_RETURNED_MACHINE_PART"), "발전소에 가 보고\n잃어버린 기계부품을\n찾아 주자\n(블루시티 체육관)"),
     (("kanto", "MARSHBADGE"), "노랑시티 체육관\n관장 초련을 이기자"),
@@ -325,7 +325,7 @@ def dex_strings(f, names, enc):
     for sp in range(1, 252):
         name = names[sp][0]
         if sp in roam:
-            parts = [name, enc("배회")]
+            parts = [name, enc("배회"), enc("웅취")]   # 엔딩 뒤 공박사가 주는 웅취(kr_patch patch_ungchwi)
         elif sp in best:
             lm, _, method = best[sp]
             parts = [name, f.place[lm]] + ([enc(method)] if method else [])

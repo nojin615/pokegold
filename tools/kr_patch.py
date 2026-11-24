@@ -39,7 +39,7 @@ import re
 import subprocess
 from pathlib import Path
 
-from kr_guide import charmap, patch_guide
+from kr_guide import NEXT, charmap, patch_guide
 
 # Korean text box codes (read from the Korean ROM's own texts: Elm, Lugia, Ho-Oh)
 TX_START, TX_LINE, TX_PARA, TX_CONT, TX_DONE, TX_PLAYER = 0x00, 0x5A, 0x5C, 0x5D, 0x5E, 0x51
@@ -50,6 +50,16 @@ ELM_ASK = ["공박사『", TX_PLAYER, "군!", TX_LINE, "배지를 8개나 모았
            TX_LINE, "포켓몬이 있다면", TX_CONT, "여기서 진화시켜 줄까?"]
 ELM_CANNOT = ["공박사『그 포켓몬은", TX_LINE, "아직 진화할 수 없구나", TX_PARA, "통신 교환으로 진화하는지",
               TX_LINE, "필요한 도구를 지녔는지", TX_CONT, "확인해 보렴"]
+# 웅취 (3rd-generation mods' key item, user decision 2026-11-24: Elm gives it after the ending, roaming stays as is)
+UNG_ITEM = 0x19                                  # ITEM_19: unused slot (name '?', no effect)
+UNG_NAME = "웅취"
+UNG_DESC = ["풀숲에서 쓰면 배회하는", "전설의 포켓몬이 나온다"]
+ELM_UNG = ["공박사『", TX_PLAYER, "군!", TX_LINE, "챔피언이 되었다며?", TX_PARA, "축하 선물로 내가 연구하던",
+           TX_LINE, "웅취를 주마!"]
+ELM_UNG_AFTER = ["공박사『풀숲에서 웅취를 쓰면", TX_LINE, "아직 돌아다니는 전설의", TX_CONT, "포켓몬이 바로 나타날 거야!"]
+UNG_USE = ["웅취를 가득 풍겼다!"]
+UNG_NONE = ["웅취에 끌려오는", TX_LINE, "포켓몬이 없다"]
+UNG_NOT_HERE = ["여기서는 웅취를", TX_LINE, "쓸 수 없다"]
 
 
 def kr_text(r, parts):
@@ -649,8 +659,19 @@ def patch_elm_trade_evo(r):
     ask = alloc_tail(r, "Elm: trade evolution text", bank, lambda org: kr_text(r, ELM_ASK))
     cannot = alloc_tail(r, "Elm: cannot evolve text", bank, lambda org: kr_text(r, ELM_CANNOT))
     back = gb_addr(elm) + 5
+    ung = alloc_tail(r, "Elm: 웅취 text", bank, lambda org: kr_text(r, ELM_UNG))
+    ung_after = alloc_tail(r, "Elm: 웅취 after text", bank, lambda org: kr_text(r, ELM_UNG_AFTER))
     script = alloc_tail(r, "ProfElmScript (trade evolution)", bank, lambda org: asm([
         0x6B,                                        # faceplayer
+        # 웅취 after the ending: EVENT_GOT_SS_TICKET_FROM_ELM (given after the Elite Four) and none in the bag yet
+        0x31, 0x24, 0x00,                            # checkevent EVENT_GOT_SS_TICKET_FROM_ELM
+        0x08, ("abs", "evo"),                        # iffalse .evo
+        0x21, UNG_ITEM,                              # checkitem 웅취
+        0x09, ("abs", "evo"),                        # iftrue .evo
+        0x48, 0x4D, *lo_hi(ung), 0x55,               # opentext / writetext / promptbutton
+        0x9E, UNG_ITEM, 0x01,                        # verbosegiveitem 웅취
+        0x4D, *lo_hi(ung_after), 0x54, 0x4A, 0x91,   # writetext / waitbutton / closetext / end
+        "evo:",
         0x34, ENGINE_RISINGBADGE, 0x00,              # checkflag ENGINE_RISINGBADGE
         0x08, ("abs", "no"),                         # iffalse .no
         0x48, 0x4D, *lo_hi(ask),                     # opentext / writetext (evolve one?)
@@ -667,6 +688,87 @@ def patch_elm_trade_evo(r):
         "yes:", 0x7B, 0x91,                          # reloadmap / end
     ], org))
     r.put("Elm: trade evolution", elm, r.d[elm:elm + 5], [0x04, bank, *lo_hi(script)])
+
+
+SQUIRTBOTTLE = 0xAF
+
+
+def patch_ungchwi(r):
+    """웅취: the unused ITEM_19 becomes a key item (Squirtbottle's attributes). Used in grass (or a cave) where wild
+    Pokémon appear, it starts a battle with the first roaming legend still roaming (wRoamMon1..3 species not 0 —
+    the game clears the species once it is caught or defeated) at its roaming level, HP and DVs
+    (BATTLETYPE_ROAMING, as CheckEncounterRoamMon does). Roaming itself is unchanged (user decision 2026-11-24).
+    Elm gives it after the ending (patch_elm_trade_evo). Addresses come from the code that uses them."""
+    d = charmap(r.d)
+    # name: item names are packed 0x50-terminated strings read in order, so the whole table moves to bank 6C's tail
+    np = 0x35C3 + 9                                               # NamesPointers: mon, move, (none), item
+    assert bytes(r.d[np:np + 3]) == bytes([0x6C, 0x00, 0x40]), "item names pointer"
+    start = 0x6C * 0x4000
+    names, i = [], start
+    for _ in range(0xFF):
+        j = r.d.index(0x50, i)
+        names.append(bytes(r.d[i:j + 1]))
+        i = j + 1
+    names[UNG_ITEM - 1] = d(UNG_NAME) + b"\x50"
+    table = alloc_tail(r, "웅취: item names", 0x6C, lambda org: b"".join(names))
+    r.put("웅취: item names pointer", np + 1, r.d[np + 1:np + 3], lo_hi(table))
+    # description
+    pd = r.find("PrintItemDescription", "D5 21 ?? ?? FA ?? ?? 3D 4F 06 00 09 09 3E ?? CD")
+    db_, dt = r.d[pd + 14], r.d[pd + 2] | r.d[pd + 3] << 8
+    desc = alloc_tail(r, "웅취: description", db_, lambda org: d(UNG_DESC[0]) + bytes([NEXT]) + d(UNG_DESC[1]) + b"\x50")
+    e = db_ * 0x4000 + dt - 0x4000 + 2 * (UNG_ITEM - 1)
+    r.put("웅취: description pointer", e, r.d[e:e + 2], lo_hi(desc))
+    # attributes = Squirtbottle's (key item, can't toss, field use closes the bag)
+    a = r.find("item attributes", "34 08 00 00 ?? ?? ?? 34 08 00 00 ?? ?? ?? 34 08 00 00 ?? ?? ??")
+    at, sq = a + (UNG_ITEM - 0x16) * 7, a + (SQUIRTBOTTLE - 0x16) * 7
+    r.put("웅취: attributes", at, r.d[at:at + 7], r.d[sq:sq + 7])
+    # addresses
+    die = r.find("_DoItemEffect", "FA ?? ?? EA ?? ?? CD ?? ?? CD ?? ?? 3E 01 EA ?? ?? FA ?? ?? 3D 21 ?? ?? EF C9")
+    succeeded, effects = r.d[die + 15] | r.d[die + 16] << 8, r.d[die + 22] | r.d[die + 23] << 8
+    assert die // 0x4000 == 3
+    q = r.find("QueueScript", "F0 9F EA ?? ?? 7D EA ?? ?? 7C EA ?? ?? C9")
+    ss = r.find("SweetScentEncounter", "3E ?? 21 ?? ?? CF 30 27 21 ?? ?? CB 56 20 14 3E ?? 21 ?? ?? CF 78 A7 28")
+    can_b, can = r.d[ss + 1], r.d[ss + 3] | r.d[ss + 4] << 8
+    flags2 = r.d[ss + 9] | r.d[ss + 10] << 8
+    rate_b, rate = r.d[ss + 16], r.d[ss + 18] | r.d[ss + 19] << 8
+    sweet = r.find("SweetScent script", "7C 0F ?? ?? 0E ?? ?? ?? 4D ?? ?? 54 0E")
+    roam = r.find("CheckEncounterRoamMon", "E6 03 28 28 3D 21 ?? ?? 4F 06 00 3E 07 CD ?? ?? 7A BE 20 18 23 7B BE 20 13 "
+                                           "2B 2B 2B 2A EA ?? ?? 7E EA ?? ?? 3E 05 EA ?? ?? E1 37 C9")
+    roam1 = (r.d[roam + 6] | r.d[roam + 7] << 8) - 2                 # wRoamMon1Species (map group is +2)
+    temp_sp, level, btype = (r.d[roam + 30] | r.d[roam + 31] << 8, r.d[roam + 34] | r.d[roam + 35] << 8,
+                             r.d[roam + 39] | r.d[roam + 40] << 8)
+    script_var = KR2["wScriptVar"]
+    pick = alloc_tail(r, "웅취: pick roamer", 3, lambda org: asm([
+        0x3E, can_b, 0x21, *lo_hi(can), 0xCF, ("jr", 0x30, "no"),      # farcall CanEncounterWildMon / jr nc
+        0x21, *lo_hi(flags2), 0xCB, 0x56, ("jr", 0x20, "no"),          # bug contest
+        0x3E, rate_b, 0x21, *lo_hi(rate), 0xCF, 0x78, 0xA7, ("jr", 0x28, "no"),   # GetMapEncounterRate: b = 0 → none
+        0x21, *lo_hi(roam1), 0x0E, 0x03,
+        "loop:", 0x7E, 0xA7, ("jr", 0x20, "found"), 0x11, 0x07, 0x00, 0x19, 0x0D, ("jr", 0x20, "loop"),
+        0x3E, 0x02, 0xEA, *lo_hi(script_var), 0xC9,                    # 2: no roamer left
+        "found:", 0xEA, *lo_hi(temp_sp), 0x23, 0x7E, 0xEA, *lo_hi(level),
+        0x3E, 0x05, 0xEA, *lo_hi(btype),                               # BATTLETYPE_ROAMING
+        0x3E, 0x01, 0xEA, *lo_hi(script_var), 0xC9,
+        "no:", 0xAF, 0xEA, *lo_hi(script_var), 0xC9,                   # 0: not here
+    ], org))
+    t_use = alloc_tail(r, "웅취: use text", 3, lambda org: kr_text(r, UNG_USE))
+    t_none = alloc_tail(r, "웅취: none text", 3, lambda org: kr_text(r, UNG_NONE))
+    t_not = alloc_tail(r, "웅취: not here text", 3, lambda org: kr_text(r, UNG_NOT_HERE))
+    script = alloc_tail(r, "웅취: script", 3, lambda org: asm([
+        0x7C, *r.d[sweet + 1:sweet + 4],             # refreshmap / special UpdateTimePals (as Sweet Scent)
+        0x0E, 3, *lo_hi(pick),                       # callasm pick
+        0x08, ("abs", "not"),                        # iffalse .not
+        0x06, 0x02, ("abs", "none"),                 # ifequal 2, .none
+        0x4D, *lo_hi(t_use), 0x54,                   # writetext / waitbutton
+        0x5F, 0x60, 0x91,                            # startbattle / reloadmapafterbattle / end
+        "not:", 0x4D, *lo_hi(t_not), 0x54, 0x4A, 0x91,
+        "none:", 0x4D, *lo_hi(t_none), 0x54, 0x4A, 0x91,
+    ], org))
+    effect = alloc_tail(r, "웅취: item effect", 3, lambda org: asm([
+        0x21, *lo_hi(script), 0xCD, *lo_hi(gb_addr(q)),                 # ld hl, script / call QueueScript
+        0x3E, 0x01, 0xEA, *lo_hi(succeeded), 0xC9,
+    ], org))
+    e = 3 * 0x4000 + effects - 0x4000 + 2 * (UNG_ITEM - 1)
+    r.put("웅취: item effect pointer", e, r.d[e:e + 2], lo_hi(effect))
 
 
 def wild_species_offsets(data, start):
@@ -787,6 +889,7 @@ def main():
     patch_catch(r)
     patch_even_odds(r)
     patch_elm_trade_evo(r)
+    patch_ungchwi(r)
     patch_evo_mart(r)
     patch_route29_starters(r)
     patch_route1_kanto_starters(r)
