@@ -704,6 +704,20 @@ def patch_even_fish_tree(r):
     back = gb_addr(tree + 13)                                        # .ok: ld a,[hli] / cp -1
     t = alloc_tail(r, "even trees", tree // 0x4000, lambda org: asm(even_list_pick(rnd, back, 3, "end", False), org))
     r.put("even trees", tree, r.d[tree:tree + 13], [0xC3, *lo_hi(t)])
+    # Bug-Catching Contest (ChooseWildEncounter_BugContest, user decision 2026-11-24): ContestMons entries (percent, species,
+    # min, max) are all different species, so a random entry is an even species pick
+    bc = r.find("BugContest .loop", "CD 3B 31 FE C8 30 F9 CB 3F 21 ?? ?? 11 04 00 96 38 03 19 18 FA 23")
+    cm = r.d[bc + 10] | r.d[bc + 11] << 8
+    o, sps = (bc // 0x4000) * 0x4000 + cm - 0x4000, []
+    while sum(r.d[o + 4 * len(sps)] for _ in [0]) and r.d[o + 4 * len(sps)] != 0xFF and sum(r.d[o + 4 * k] for k in range(len(sps))) < 100:
+        sps.append(r.d[o + 4 * len(sps) + 1])
+    assert len(sps) == len(set(sps)) and 1 < len(sps) <= 16 and sum(r.d[o + 4 * k] for k in range(len(sps))) == 100, sps
+    got = gb_addr(bc + 21)                                           # .GotMon: inc hl
+    t = alloc_tail(r, "even bug contest", bc // 0x4000, lambda org: asm([
+        "pick:", 0xCD, *lo_hi(rnd), 0xE6, 0x0F, 0xFE, len(sps), ("jr", 0x30, "pick"),
+        0x87, 0x87, 0x5F, 0x16, 0x00, 0x21, *lo_hi(cm), 0x19, 0xC3, *lo_hi(got),   # hl = ContestMons + 4 index
+    ], org))
+    r.put("even bug contest", bc, r.d[bc:bc + 21], [0xC3, *lo_hi(t)])
 
 
 def patch_elm_trade_evo(r):
