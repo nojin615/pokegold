@@ -621,7 +621,8 @@
       const paths = M.filePaths();
       const romPath = `${paths.gamePath}/${G.rom}`;
       const savePath = `${paths.savePath}/${G.rom.replace(/\.\w+$/, '')}.sav`;
-      const res = await fetch('roms/' + G.rom);
+      // ROM은 매번 서버에 재확인(같은 크기 새 ROM도 받음) — EmulatorJS 쪽은 EJS_DEBUG_XX로 IndexedDB ROM 캐시를 안 씀
+      const res = await fetch('roms/' + G.rom, { cache: 'no-cache' });
       if (!res.ok) { report(`ROM을 받지 못했습니다 (${res.status})`); return; }
       const rom = new Uint8Array(await res.arrayBuffer());
       M.FS.writeFile(romPath, rom);
