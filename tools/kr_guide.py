@@ -301,6 +301,10 @@ def dex_strings(f, names, enc):
             continue
         g, n, _, _ = f.maps[mname]
         offer(sid[s], (g, n), 3, {"loadwildmon": "만남", "givepoke": "선물", "giveegg": "알 선물"}[cmd])
+    # fossil gift added by kr_patch.patch_fossil_gift (not in the source scripts)
+    g, n, _, _ = f.maps["RuinsOfAlphResearchCenter"]
+    for s in ("OMANYTE", "KABUTO", "AERODACTYL"):
+        offer(sid[s], (g, n), 3, "선물")
     for mname, s in D.trades(f.repo):
         g, n, _, _ = f.maps[mname]
         offer(sid[s], (g, n), 4, "교환")

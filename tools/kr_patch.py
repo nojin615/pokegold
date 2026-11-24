@@ -39,7 +39,7 @@ import re
 import subprocess
 from pathlib import Path
 
-from kr_guide import NEXT, charmap, patch_guide
+from kr_guide import NEXT, charmap, mon_names, patch_guide
 
 # Korean text box codes (read from the Korean ROM's own texts: Elm, Lugia, Ho-Oh)
 TX_START, TX_LINE, TX_PARA, TX_CONT, TX_DONE, TX_PLAYER = 0x00, 0x5A, 0x5C, 0x5D, 0x5E, 0x51
@@ -60,12 +60,16 @@ ELM_UNG_AFTER = ["공박사『풀숲에서 웅취를 쓰면", TX_LINE, "아직 �
 UNG_USE = ["웅취를 가득 풍겼다!"]
 UNG_NONE = ["웅취에 끌려오는", TX_LINE, "포켓몬이 없다"]
 UNG_NOT_HERE = ["여기서는 웅취를", TX_LINE, "쓸 수 없다"]
+# fossil Pokémon gift (user decision 2026-11-24: get them without trading, from the start) — Ruins of Alph research center
+FOSSILS = [0x8A, 0x8C, 0x8E]                    # Omanyte, Kabuto, Aerodactyl (names from the ROM: 암나이트·투구·프테라)
+FOSSIL_LEVEL = 20
+FOSSIL_TEXT = ["연구원『유적에서 나온 화석으로", TX_LINE, "되살린 포켓몬이란다", TX_PARA, "도감을 채우는 데", TX_LINE, "써 주렴!"]
 
 
 def kr_text(r, parts):
-    """text command data: start, Korean text (strings via kr_guide.charmap, ints = control codes), done"""
+    """text command data: start, Korean text (strings via kr_guide.charmap, bytes as they are, ints = control codes), done"""
     enc = charmap(r.d)
-    body = b"".join(enc(x) if isinstance(x, str) else bytes([x]) for x in parts)
+    body = b"".join(enc(x) if isinstance(x, str) else x if isinstance(x, bytes) else bytes([x]) for x in parts)
     return bytes([TX_START]) + body + bytes([TX_DONE])
 
 BASE_SHA1 = {"c0ff3999e1093e1af59ef3eea3f1bfd7c1f18a65": "GOLD",     # POKEMON_GLD AAUK
@@ -771,6 +775,39 @@ def patch_ungchwi(r):
     r.put("웅취: item effect pointer", e, r.d[e:e + 2], lo_hi(effect))
 
 
+RUINS_RESEARCH_CENTER = (3, 28)                     # constants/map_constants.asm (DUNGEONS group)
+
+
+def patch_fossil_gift(r):
+    """The wandering scientist in the Ruins of Alph research center gives the fossil Pokémon not caught yet
+    (Omanyte, Kabuto, Aerodactyl, one per talk, Lv FOSSIL_LEVEL) — in Gold/Silver they came only by trade.
+    givepoke registers the species as caught, so the next talk gives the next one; with all three caught the
+    original talk runs. The caught check is CheckCaughtMon (a = species - 1, nz = caught)."""
+    at, bank, ev, size, objs = map_events(r.d, *RUINS_RESEARCH_CENTER)
+    assert objs == 3, "research center objects"
+    sci2 = ev + size - 13 * objs + 13 + 9            # 2nd object_event: script pointer
+    orig = r.d[sci2] | r.d[sci2 + 1] << 8
+    assert r.d[bank * 0x4000 + orig - 0x4000] == 0x6B, "scientist 2 script starts with faceplayer"
+    caught = r.find("CheckCaughtMon", "4F 21 ?? ?? 06 02 18 ?? 4F 21")
+    sv = KR2["wScriptVar"]
+    pick = alloc_tail(r, "fossil gift: pick", bank, lambda org: asm(
+        sum(([0x3E, sp - 1, 0xCD, *lo_hi(caught), 0x3E, sp, ("jr", 0x28, "give")] for sp in FOSSILS), [])
+        + [0xAF, "give:", 0xEA, *lo_hi(sv), 0xC9], org))
+    names = mon_names(r.d)
+    texts = {sp: alloc_tail(r, f"fossil gift: {sp:02x} text", bank,       # every name ends in a vowel: 를
+                            lambda org, n=names[sp][0]: kr_text(r, FOSSIL_TEXT + [TX_PARA, n, "를 받았다!"])) for sp in FOSSILS}
+    items = [0x6B, 0x0E, bank, *lo_hi(pick),          # faceplayer / callasm pick
+             0x08, *lo_hi(orig)]                       # iffalse original script (all three caught)
+    for k, sp in enumerate(FOSSILS[:-1]):
+        items += [0x06, sp, ("abs", f"f{k}")]          # ifequal species, .fk
+    for k, sp in enumerate(FOSSILS):
+        items += [f"f{k}:", 0x48, 0x4D, *lo_hi(texts[sp]), 0x55,   # opentext / writetext / promptbutton
+                  0x2D, sp, FOSSIL_LEVEL, 0x00, 0x00,               # givepoke species, level
+                  0x4A, 0x91]                                       # closetext / end
+    script = alloc_tail(r, "fossil gift: script", bank, lambda org: asm(items, org))
+    r.put("fossil gift: scientist script pointer", sci2, r.d[sci2:sci2 + 2], lo_hi(script))
+
+
 def wild_species_offsets(data, start):
     """All species bytes of Johto grass/water and Kanto grass/water tables, in table order."""
     off, out = start, []
@@ -829,12 +866,35 @@ def patch_wild_src(r, en_rom, en_sym, version, repo, base_ref="origin/master"):
         orig += asm_species(old, version)
         cur += asm_species((Path(repo) / f).read_text(encoding="utf-8"), version)
     assert len(orig) == len(cur) == len(en_offs), (len(orig), len(cur), len(en_offs))
-    changed = 0
+    changed, moved = 0, set()
     for i, (a, b) in enumerate(zip(orig, cur)):
         if a != b:
             r.d[kr_offs[i]] = en[en_offs[i]]
             changed += 1
+            moved.add(i)
     r.log.append(f"wild: {kr_start:06x}-{kr_end:06x} {changed} changed species copied from the English build")
+    # The Korean tables put some version exclusives in other slots than the English ones (Korean Gold Route 45 has
+    # Phanpy where English Gold has Teddiursa), so copying only the changed slots can repeat a species and drop the
+    # other one (Teddiursa was nowhere in Korean Gold, Phanpy nowhere in Korean Silver — guide '통신 교환').
+    # Only species of the English mod's wild data that are nowhere in the Korean wild data: in every time-of-day block
+    # (grass 7 slots, water 3) of the English mod that has it, it goes into a repeated slot, copied slots first
+    # (the Korean tables' own other differences from the English ones stay).
+    blocks, pos = [], 0
+    for f in WILD_FILES:
+        n = len(asm_species((Path(repo) / f).read_text(encoding="utf-8"), version))
+        size = 7 if "grass" in f else 3
+        blocks += [range(pos + k, pos + k + size) for k in range(0, n, size)]
+        pos += n
+    absent = {en[o] for o in en_offs} - {r.d[o] for o in kr_offs}
+    for blk in blocks:
+        want = {en[en_offs[i]] for i in blk} & absent
+        for sp in sorted(want - {r.d[kr_offs[i]] for i in blk}):
+            have = [r.d[kr_offs[i]] for i in blk]
+            spare = [i for k, i in enumerate(blk) if have.count(have[k]) > 1]
+            assert spare, f"wild: no repeated slot for species {sp:02x}"
+            i = next((i for i in spare if i in moved), spare[-1])
+            r.put(f"wild: missing species {sp:02x}", kr_offs[i], r.d[kr_offs[i]:kr_offs[i] + 1], [sp])
+            moved.discard(i)
     return kr_start
 
 
@@ -890,6 +950,7 @@ def main():
     patch_even_odds(r)
     patch_elm_trade_evo(r)
     patch_ungchwi(r)
+    patch_fossil_gift(r)
     patch_evo_mart(r)
     patch_route29_starters(r)
     patch_route1_kanto_starters(r)
