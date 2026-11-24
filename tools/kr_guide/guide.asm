@@ -467,7 +467,7 @@ LoadEntry:                             ; hl = [wGuideEntry]
 	ld h, a
 	ret
 
-; entry: db kind (0 fixed, 1 roaming); dw text; dw address; db mask
+; entry: db kind (0 fixed, 1 roaming, 2 note — a text-only line, e.g. the wing a legend needs); dw text; dw address; db mask
 ; fixed: address/mask = its event flag; roaming: address = its roam struct (species, level, group, number)
 LegendLine:
 	call LoadEntry
@@ -481,6 +481,9 @@ LegendLine:
 	pop de
 	call PlaceString
 	call LoadEntry
+	ld a, [hl]
+	cp 2
+	ret z                              ; note: text only
 	ld a, [hli]
 	and a
 	jr nz, .roaming

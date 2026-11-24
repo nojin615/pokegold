@@ -36,6 +36,14 @@ DONE_COL = 16                       # guide.asm DONE_COL ('끝' on the legend pa
 LEGEND_ORDER = ["ARTICUNO", "ZAPDOS", "MOLTRES", "MEWTWO", "MEW", "CELEBI", "HO_OH", "LUGIA"]
 
 # (condition, text): event flag or badge, in story order (leader and item names as the Korean ROM writes them)
+# 전설과 환상: 날개가 있어야 만나는 두 전설 아래 줄(사용자 지시 2026-11-24) — 판마다 받는 곳이 다르다(maps/PewterCity.asm·RadioTower5F.asm checkver:
+# 회색시티 할아버지는 골드 은빛날개·실버 무지개날개, 라디오타워 국장은 골드 무지개날개·실버 은빛날개)
+LEGEND_NOTES = {
+    ("GOLD", "LUGIA"): ["은빛날개가 있어야 한다", "엔딩 뒤 회색시티 할아버지"],
+    ("GOLD", "HO_OH"): ["무지개날개가 있어야 한다", "라디오타워 국장(로켓단 뒤)"],
+    ("SILVER", "HO_OH"): ["무지개날개가 있어야 한다", "엔딩 뒤 회색시티 할아버지"],
+    ("SILVER", "LUGIA"): ["은빛날개가 있어야 한다", "라디오타워 국장(로켓단 뒤)"],
+}
 GOALS = [
     (("event", "EVENT_GOT_A_POKEMON_FROM_ELM"), "연두마을 공박사의\n연구소에서\n포켓몬을 받자"),
     (("event", "EVENT_GOT_MYSTERY_EGG_FROM_MR_POKEMON"), "30번 도로 북쪽 끝\n집에 심부름을 가자"),
@@ -553,12 +561,17 @@ def build_data(f, enc, wild_banks):
     # 전설과 환상
     sid = {s: i + 1 for i, s in enumerate(f.species)}
     lines.append("LegendTable:")
+    silver = b"SLV" in f.en[0x134:0x144]
     for sp, mname, flag in f.legends:
         g, n, _, _ = f.maps[mname]
         text = names[sid[sp]][0] + b"\x7f" + f.place[f.landmark_of[(g, n)]]
         check_lines(sp, text, 1, DONE_COL - 3)
         addr, mask = f.flag("event", flag)
         lines.append(f"\tdb 0\n\tdw {label(text)}, ${addr:04X}\n\tdb ${mask:02X}")
+        for note in LEGEND_NOTES.get(("SILVER" if silver else "GOLD", sp), ()):   # kind 2: a text-only line under it
+            raw = enc("  " + note)
+            check_lines(f"{sp} note", raw, 1)
+            lines.append(f"\tdb 2\n\tdw {label(raw)}, 0\n\tdb 0")
     for k, sp in enumerate(D.ROAMERS):
         struct = f.ram["wRoamMon1MapGroup"] - 2 + ROAM_STRUCT * k
         lines.append(f"\tdb 1\n\tdw {label(names[sid[sp]][0])}, ${struct:04X}\n\tdb 0")
